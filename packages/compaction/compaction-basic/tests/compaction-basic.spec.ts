@@ -8,6 +8,7 @@ import { frameSummary } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.t
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
+  outputReserveForCompaction,
   resolveCompactSpec,
   resolveConfig,
   resolveTargetPolicy,
@@ -453,6 +454,20 @@ describe('compact configuration and defaults', () => {
     const policy = resolveTargetPolicy(resolveConfig({ headroomTokens: 420 }), { provider: MODEL, model: MODEL })
     expect(() => resolveCompactSpec(policy, 1_000, 500))
       .toThrow(/retainTokens \(80\) must be less than threshold tokens 80/)
+  })
+
+  it('drops a reserve that consumes the window so the normal pressure budget still applies', () => {
+    const policy = resolveTargetPolicy(resolveConfig({}), { provider: MODEL, model: MODEL })
+    const reserve = outputReserveForCompaction(1_000_000, 1_000_000, policy.headroomTokens)
+
+    expect(reserve).toBe(0)
+    expect(resolveCompactSpec(policy, 1_000_000, reserve)).toMatchObject({
+      thresholdTokens: 800_000,
+      retainTokens: 160_000,
+    })
+    expect(outputReserveForCompaction(256_000, 1_000_000, policy.headroomTokens)).toBe(256_000)
+    expect(outputReserveForCompaction(950_000, 1_000_000, policy.headroomTokens)).toBe(0)
+    expect(outputReserveForCompaction(1_000, 1_000, policy.headroomTokens)).toBe(1_000)
   })
 
   it('rejects a reserve that leaves no message budget or is not a count', () => {

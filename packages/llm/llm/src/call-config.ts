@@ -8,6 +8,7 @@
 
 import type { GenerateOptions } from './types.ts'
 import type { ReasoningEffortId } from './brand.ts'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError } from './error.ts'
 
 /** Process-local identities of request objects assembled by dsh-agent-loop. */
 const AGENT_LOOP_REQUESTS = new WeakSet<GenerateOptions>()
@@ -75,4 +76,40 @@ export function markAgentLoopRequest<T extends GenerateOptions>(request: T): T {
  */
 export function isAgentLoopRequest(request: GenerateOptions): boolean {
   return AGENT_LOOP_REQUESTS.has(request)
+}
+
+/**
+ * Tokens kept back so a slightly low prompt measurement cannot ask for an
+ * output cap the provider must reject as larger than the remaining window.
+ */
+const OUTPUT_FIT_MARGIN = 1_024
+
+/**
+ * Shrink a requested output cap so it fits beside the prompt in the context
+ * window. The logged header keeps the configured cap; only the dispatched
+ * request uses the fitted value. A prompt that already fills the window fails
+ * as context overflow so recovery can compact instead of ending the turn as a
+ * zero-output `max-tokens` stop.
+ * @param requested - configured or adapter-default output cap.
+ * @param contextWindow - model context capacity, when the adapter disclosed one.
+ * @param promptTokens - tokens the prompt already occupies.
+ * @returns the cap to send, or the request unchanged when either bound is absent.
+ */
+export function fitRequestMaxTokens(
+  requested: number | undefined,
+  contextWindow: number | undefined,
+  promptTokens: number,
+): number | undefined {
+  if (requested === undefined || contextWindow === undefined) return requested
+  if (!Number.isSafeInteger(requested) || requested < 1) return requested
+  if (!Number.isSafeInteger(contextWindow) || contextWindow < 1) return requested
+  const prompt = Number.isSafeInteger(promptTokens) && promptTokens > 0 ? promptTokens : 0
+  const room = contextWindow - prompt - OUTPUT_FIT_MARGIN
+  if (room < 1) {
+    throw new HarnessError(
+      `the ${contextWindow}-token context window has no room left for output after ${prompt} prompt tokens`,
+      CONTEXT_WINDOW_EXCEEDED_CODE,
+    )
+  }
+  return Math.min(requested, room)
 }

@@ -17,6 +17,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
+  outputReserveForCompaction,
   resolveCompactSpec,
   resolveConfig,
   resolveTargetPolicy,
@@ -314,7 +315,11 @@ export class BasicCompactionEngine extends CompactionEngine {
     const spec = resolveCompactSpec(
       policy,
       info.context.contextWindow,
-      reservedCompletionTokens(agent, info.defaultMaxTokens),
+      outputReserveForCompaction(
+        reservedCompletionTokens(agent, info.defaultMaxTokens),
+        info.context.contextWindow,
+        policy.headroomTokens,
+      ),
     )
     if (measurement.totalTokens < spec.thresholdTokens) return null
 

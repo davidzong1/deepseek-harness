@@ -31,7 +31,7 @@ import { freezeMessage } from './message.ts'
 import { resolveRetryPolicy } from './retry-policy.ts'
 import type { ResolvedRetryPolicy } from './retry-policy.ts'
 import type { ProviderRequestId } from './brand.ts'
-import { callConfigEquals } from './call-config.ts'
+import { callConfigEquals, fitRequestMaxTokens } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
@@ -1084,6 +1084,15 @@ export class LlmRuntime extends TypertRemoteService {
         }
         if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
       }
+      const fittedMaxTokens = fitRequestMaxTokens(
+        projectedOptions.maxTokens,
+        modelInfo.context?.contextWindow,
+        promptTokensFor(this.ctx, projectedOptions),
+      )
+      if (fittedMaxTokens !== projectedOptions.maxTokens) {
+        projectedOptions = { ...projectedOptions, maxTokens: fittedMaxTokens }
+        if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
+      }
       const stream = dispatch(this.forAdapter(projectedOptions, adapter))
       iterator = stream[Symbol.asyncIterator]()
     } catch (error: unknown) {
@@ -1147,6 +1156,38 @@ export class LlmRuntime extends TypertRemoteService {
       () => this.adapterStream(options, prepared),
     )
   }
+}
+
+/** Rough prompt size used only when the session token meter is not mounted. */
+function estimatePromptTokens(options: GenerateOptions): number {
+  let chars = options.system?.length ?? 0
+  for (const message of options.messages) chars += JSON.stringify(message.content).length
+  if (options.tools !== undefined) chars += JSON.stringify(options.tools).length
+  return Math.ceil(chars / 4)
+}
+
+/**
+ * Prompt occupancy for output-cap fitting. The session meter prices the same
+ * surface the loop just derived; a meter-less call falls back to a character
+ * estimate so a cap equal to the whole window is still reduced.
+ */
+function promptTokensFor(ctx: Context, options: GenerateOptions): number {
+  const sessionId = options.sessionId
+  if (sessionId !== undefined) {
+    try {
+      const sessions = ctx.get('sessions') as { get(id: unknown): unknown } | undefined
+      const meter = ctx.get('tokenMeter') as { measure(session: unknown): { totalTokens: number } } | undefined
+      const session = sessions?.get(sessionId)
+      if (meter !== undefined && session !== undefined) {
+        const measured = meter.measure(session).totalTokens
+        if (Number.isSafeInteger(measured) && measured >= 0) return measured
+      }
+    } catch {
+      // A missing session or a meter that cannot price this surface falls back
+      // to the request text so dispatch still refuses an impossible output cap.
+    }
+  }
+  return estimatePromptTokens(options)
 }
 
 /** Convert one adapter throw into the stream protocol's terminal outcome. */

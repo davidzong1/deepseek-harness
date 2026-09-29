@@ -139,6 +139,35 @@ export function resolveTargetPolicy(
 }
 
 /**
+ * Output tokens pressure compaction may reserve.
+ *
+ * A cap that consumes the window after headroom (max output equal to the
+ * context window is the common case) cannot sit beside any prompt. Reserving
+ * it disables compaction and the next request is born with no output room.
+ * Reserve nothing then, and let dispatch shrink the sent cap to the room the
+ * prompt actually leaves.
+ * @param requested - effective request output cap, or the adapter default.
+ * @param contextWindow - routed model capacity.
+ * @param headroomTokens - extra tokens the policy keeps beyond the output reserve.
+ * @returns the reserve `resolveCompactSpec` should use.
+ */
+export function outputReserveForCompaction(
+  requested: number,
+  contextWindow: number,
+  headroomTokens: number,
+): number {
+  if (!Number.isSafeInteger(requested) || requested <= 0) return 0
+  if (!Number.isSafeInteger(contextWindow) || contextWindow < 1) return requested
+  const headroom = Number.isSafeInteger(headroomTokens) && headroomTokens > 0 ? headroomTokens : 0
+  // A window that cannot hold the policy headroom keeps the raw reserve so
+  // resolveCompactSpec reports that configuration. A cap that consumes the
+  // remaining room on a usable window is dropped so the normal threshold runs.
+  if (contextWindow <= headroom) return requested
+  if (requested > contextWindow - headroom) return 0
+  return requested
+}
+
+/**
  * Scale one routed policy into concrete token budgets for its model capacity.
  *
  * Pressure is capped by both the window fraction and the capacity remaining

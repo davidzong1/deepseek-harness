@@ -6,7 +6,8 @@
 
 import { describe, expect, it } from 'vitest'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
-import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
+import { callConfigEquals, fitRequestMaxTokens, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../src/error.ts'
 import { ReasoningEffortId } from '../src/brand.ts'
 import type { GenerateOptions } from '../src/types.ts'
 
@@ -27,6 +28,24 @@ describe('callConfigEquals', () => {
     expect(callConfigEquals({ ...base, stop: ['a'] }, { ...base, stop: ['a', 'b'] })).toBe(false)
     expect(callConfigEquals({ ...base, stop: ['a'] }, { ...base, stop: ['b'] })).toBe(false)
     expect(callConfigEquals({ ...base, stop: ['a', 'b'] }, { ...base, stop: ['a', 'b'] })).toBe(true)
+  })
+})
+
+describe('fitRequestMaxTokens', () => {
+  it('keeps a cap that fits beside the prompt', () => {
+    expect(fitRequestMaxTokens(256_000, 1_000_000, 10_000)).toBe(256_000)
+    expect(fitRequestMaxTokens(undefined, 1_000_000, 10_000)).toBeUndefined()
+    expect(fitRequestMaxTokens(1_000_000, undefined, 10_000)).toBe(1_000_000)
+  })
+
+  it('shrinks a cap equal to the whole window down to the room the prompt leaves', () => {
+    expect(fitRequestMaxTokens(1_000_000, 1_000_000, 200_000)).toBe(1_000_000 - 200_000 - 1_024)
+  })
+
+  it('fails as context overflow when the prompt already fills the window', () => {
+    expect(() => fitRequestMaxTokens(1_000_000, 1_000_000, 1_000_000)).toThrow(expect.objectContaining({
+      code: CONTEXT_WINDOW_EXCEEDED_CODE,
+    }))
   })
 })
 
