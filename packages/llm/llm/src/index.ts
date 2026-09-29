@@ -1089,7 +1089,7 @@ export class LlmRuntime extends TypertRemoteService {
         modelInfo.context?.contextWindow,
         promptTokensFor(this.ctx, projectedOptions),
       )
-      if (fittedMaxTokens !== projectedOptions.maxTokens) {
+      if (fittedMaxTokens !== undefined && fittedMaxTokens !== projectedOptions.maxTokens) {
         projectedOptions = { ...projectedOptions, maxTokens: fittedMaxTokens }
         if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
       }
