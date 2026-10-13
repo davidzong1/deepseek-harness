@@ -32,7 +32,7 @@ import { resolveRetryPolicy } from './retry-policy.ts'
 import type { ResolvedRetryPolicy } from './retry-policy.ts'
 import type { ProviderRequestId } from './brand.ts'
 import { callConfigEquals, fitRequestMaxTokens } from './call-config.ts'
-import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+import type { ConfigureCall, LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
@@ -52,7 +52,7 @@ export * from './message.ts'
 export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
-export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+export type { ConfigureCall, LlmCallConfig, LlmCallConfigAdapterDefaults, LlmCallControls } from './call-config.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -922,24 +922,39 @@ export class LlmRuntime extends TypertRemoteService {
    * Resolve one call under its current adapter registration. The returned
    * one-shot handle keeps that registration across header logging and dispatch,
    * so HMR cannot combine one adapter's capability result with another adapter.
-   * @param config - provider/model route and optional request controls.
+   * An optional synchronous callback selects concrete controls using captured
+   * model metadata. Defaults and validation apply to its result. Callback
+   * failures and cancellation reject preparation before dispatch.
+   * @param config - provider/model route and optional concrete request controls.
    * @param signal - optional cancellation for adapter-owned capability lookup.
+   * @param configure - pure control selection, called once before defaults and validation.
    * @returns a prepared config and its registration-bound stream entry point.
    */
-  async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall> {
-    const registration = this.registration(config.provider)
-    const adapterCall = await registration.adapter.prepareCall(config.provider, config.model, signal)
-    const modelInfo = this.normalizeModelInfo(registration, config.model, adapterCall.model)
-    const resolved = this.resolveCallWithInfo(config, modelInfo)
+  async prepareCall(
+    config: LlmCallConfig,
+    signal?: AbortSignal,
+    configure?: ConfigureCall,
+  ): Promise<PreparedLlmCall> {
+    signal?.throwIfAborted()
+    const { provider, model, ...controls } = config
+    const registration = this.registration(provider)
+    const adapterCall = await registration.adapter.prepareCall(provider, model, signal)
+    signal?.throwIfAborted()
+    const modelInfo = this.normalizeModelInfo(registration, model, adapterCall.model)
+    const proposed = configure === undefined
+      ? config
+      : { ...configure(deepFreeze(structuredClone(controls)), deepFreeze(modelInfo)), provider, model }
+    signal?.throwIfAborted()
+    const resolved = this.resolveCallWithInfo(proposed, modelInfo)
     const resolvedConfig = deepFreeze(structuredClone(resolved.config))
     const context = resolved.context === undefined
       ? undefined
       : deepFreeze(structuredClone(resolved.context))
     const adapterDefaults = deepFreeze<LlmCallConfigAdapterDefaults>({
-      ...config.reasoningEffort === undefined && resolvedConfig.reasoningEffort !== undefined
+      ...proposed.reasoningEffort === undefined && resolvedConfig.reasoningEffort !== undefined
         ? { reasoningEffort: true }
         : {},
-      ...config.maxTokens === undefined && resolvedConfig.maxTokens !== undefined
+      ...proposed.maxTokens === undefined && resolvedConfig.maxTokens !== undefined
         ? { maxTokens: true }
         : {},
     })
@@ -1077,14 +1092,22 @@ export class LlmRuntime extends TypertRemoteService {
         }
         if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
       }
-      const fittedMaxTokens = fitRequestMaxTokens(
-        projectedOptions.maxTokens,
-        modelInfo.context?.contextWindow,
-        promptTokensFor(this.ctx, projectedOptions),
-      )
-      if (fittedMaxTokens !== undefined && fittedMaxTokens !== projectedOptions.maxTokens) {
-        projectedOptions = { ...projectedOptions, maxTokens: fittedMaxTokens }
-        if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
+      // Only ordinary conversation calls fit their output cap here. An
+      // auxiliary call (compaction summary, session title) is sized by its own
+      // producer against this same window: the compaction engine already
+      // reserves output tokens in its pressure budget, and a summary prompt is
+      // deliberately the whole span it replaces, so refusing it for lacking
+      // output room would block the compaction that frees the window.
+      if (projectedOptions.purpose === undefined) {
+        const fittedMaxTokens = fitRequestMaxTokens(
+          projectedOptions.maxTokens,
+          modelInfo.context?.contextWindow,
+          promptTokensFor(this.ctx, projectedOptions),
+        )
+        if (fittedMaxTokens !== undefined && fittedMaxTokens !== projectedOptions.maxTokens) {
+          projectedOptions = { ...projectedOptions, maxTokens: fittedMaxTokens }
+          if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
+        }
       }
       const stream = dispatch(this.forAdapter(projectedOptions, adapter))
       iterator = stream[Symbol.asyncIterator]()
